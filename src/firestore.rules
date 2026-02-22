@@ -1,0 +1,132 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===== HELPER FUNCTIONS =====
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isApproved() {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isApproved == true;
+    }
+    
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    
+    function isRole(role) {
+      return isApproved() && getUserRole() == role;
+    }
+    
+    function isAnyRole(roles) {
+      return isApproved() && getUserRole() in roles;
+    }
+    
+    // ===== USERS COLLECTION =====
+    match /users/{userId} {
+      // Allow user to read their own document
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      
+      // Allow user to create their own document (auto-sync on registration)
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      
+      // Allow user to update their own document (excluding role and isApproved)
+      allow update: if isAuthenticated() && 
+                       request.auth.uid == userId &&
+                       request.resource.data.role == resource.data.role &&
+                       request.resource.data.isApproved == resource.data.isApproved;
+      
+      // Admin (via Firebase Console) or PMO can read all users
+      allow read: if isRole('PMO');
+      
+      // Admin (via Firebase Console) can update any user (for approval)
+      // Note: In practice, Admin/Developer approves via Firebase Console manually
+      allow update: if isRole('PMO');
+    }
+    
+    // ===== PROJECTS COLLECTION =====
+    match /projects/{projectId} {
+      // All authenticated and approved users can read projects
+      allow read: if isApproved();
+      
+      // Only Sales/Pre-Sales can create/update/delete projects
+      allow create, update, delete: if isRole('Sales/Pre-Sales');
+      
+      // Unauthenticated users can read public projects (for registration page)
+      allow read: if request.auth == null;
+    }
+    
+    // ===== BOQ COLLECTION =====
+    match /boq/{boqId} {
+      // All approved users can read BOQ
+      allow read: if isApproved();
+      
+      // Sales/Pre-Sales can create/update/delete BOQ
+      allow create, update, delete: if isRole('Sales/Pre-Sales');
+      
+      // Project Manager can update BOQ (for reserving/cancelling quantity)
+      allow update: if isRole('Project Manager');
+      
+      // ✅ PMO, Sales, Purchasing, BOD can update BOQ (for cancelling when rejecting request)
+      allow update: if isAnyRole(['PMO', 'Sales/Pre-Sales', 'Purchasing', 'BOD Finance', 'BOD Procurement', 'BOD Director']);
+    }
+    
+    // ===== BOQ USAGE COLLECTION (NEW!) =====
+    match /boq_usage/{usageId} {
+      // All approved users can read BOQ usage
+      allow read: if isApproved();
+      
+      // Project Manager can create BOQ usage (when creating request from BOQ)
+      allow create: if isRole('Project Manager');
+      
+      // ✅ All roles can update BOQ usage (for cancelling when rejecting request)
+      allow update: if isAnyRole(['PMO', 'Sales/Pre-Sales', 'Purchasing', 'BOD Finance', 'BOD Procurement', 'BOD Director', 'Project Manager']);
+      
+      // Sales/Pre-Sales can delete BOQ usage
+      allow delete: if isRole('Sales/Pre-Sales');
+    }
+    
+    // ===== REQUESTS COLLECTION =====
+    match /requests/{requestId} {
+      // Project Managers can read their own requests
+      allow read: if isApproved() && 
+                     (getUserRole() == 'Project Manager' && 
+                      resource.data.requestedById == request.auth.uid);
+      
+      // All other roles can read all requests
+      allow read: if isAnyRole(['PMO', 'Sales/Pre-Sales', 'Purchasing', 'BOD Finance', 'BOD Procurement', 'BOD Director']);
+      
+      // Project Managers can create requests
+      allow create: if isRole('Project Manager') && 
+                       request.resource.data.requestedById == request.auth.uid;
+      
+      // PMO, Sales, Purchasing, BOD, PM can update requests
+      allow update: if isAnyRole(['PMO', 'Sales/Pre-Sales', 'Purchasing', 'BOD Finance', 'BOD Procurement', 'BOD Director', 'Project Manager']);
+      
+      // Only PMO can delete requests
+      allow delete: if isRole('PMO');
+    }
+    
+    // ===== NOTIFICATIONS COLLECTION =====
+    match /notifications/{notificationId} {
+      // Users can read their own notifications
+      allow read: if isAuthenticated() && 
+                     request.auth.uid == resource.data.userId;
+      
+      // System can create notifications
+      allow create: if isAuthenticated();
+      
+      // Users can update their own notifications
+      allow update: if isAuthenticated() && 
+                       request.auth.uid == resource.data.userId;
+    }
+    
+    // ===== DEFAULT DENY ALL =====
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
